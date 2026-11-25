@@ -36,8 +36,15 @@ def _configure_logging() -> None:
 
 @app.command()
 def download(
-    per_topic: Annotated[int, typer.Option(help="Max PDFs per aerospace safety topic.")] = 5,
-    max_docs: Annotated[int, typer.Option(help="Total cap on downloaded NASA NTRS PDFs.")] = 30,
+    per_topic: Annotated[int, typer.Option(help="Max PDFs per aerospace safety topic.")] = 20,
+    max_docs: Annotated[int, typer.Option(help="Total cap on downloaded NASA NTRS PDFs.")] = 200,
+    max_gb: Annotated[
+        float | None, typer.Option(help="Optional total corpus size cap in GiB (e.g. 10.0).")
+    ] = None,
+    max_pdf_mb: Annotated[
+        float, typer.Option(help="Skip individual PDFs larger than this size in MiB.")
+    ] = 80.0,
+    workers: Annotated[int, typer.Option(help="Concurrent download worker threads.")] = 6,
     topic: Annotated[list[str] | None, typer.Option(help="Custom search topics.")] = None,
 ) -> None:
     """Download NASA NTRS technical report PDFs and metadata into DATA_DIR."""
@@ -45,8 +52,15 @@ def download(
     settings = get_settings()
     topics = topic or DEFAULT_SAFETY_TOPICS
     console.print(f"[cyan]Downloading NASA NTRS corpus into:[/cyan] {settings.data_dir}")
-    with NTRSClient(settings) as client:
-        docs = client.build_corpus(topics=topics, per_topic=per_topic, max_total_docs=max_docs)
+    with NTRSClient(settings, max_connections=max(16, workers * 2)) as client:
+        docs = client.build_corpus(
+            topics=topics,
+            per_topic=per_topic,
+            max_total_docs=max_docs,
+            max_total_gb=max_gb,
+            max_pdf_mb=max_pdf_mb,
+            workers=workers,
+        )
     console.print(f"[green]Done.[/green] Total documents in manifest: {len(docs)}")
 
 
@@ -61,6 +75,9 @@ def ingest(
     force: Annotated[
         bool, typer.Option(help="Re-parse PDFs even if cached Markdown exists.")
     ] = False,
+    workers: Annotated[
+        int, typer.Option(help="Number of parallel worker processes for PDF parsing.")
+    ] = 1,
 ) -> None:
     """Parse downloaded PDFs to Markdown and generate Parent-Child (or v0 fixed) chunks."""
     _configure_logging()
@@ -70,6 +87,7 @@ def ingest(
         parser_backend=backend,
         strategy=strategy,
         force_reparse=force,
+        workers=workers,
     )
     console.print(
         f"[green]Ingestion complete[/green] ({strategy}): "

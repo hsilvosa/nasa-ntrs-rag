@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
 
@@ -65,11 +66,28 @@ def load_chunks(
     return parents, children
 
 
+def _parse_single_pdf_worker(
+    doc_id: str,
+    title: str,
+    pdf_path_str: str,
+    md_path_str: str,
+    parser_backend: ParserBackend,
+) -> tuple[str, bool, str | None]:
+    """Top-level worker function for parallel PDF -> Markdown extraction."""
+    try:
+        markdown_text = parse_pdf_to_markdown(Path(pdf_path_str), backend=parser_backend)
+        Path(md_path_str).write_text(markdown_text, encoding="utf-8")
+        return doc_id, True, None
+    except Exception as exc:
+        return doc_id, False, f"{title[:40]}: {exc}"
+
+
 def run_ingestion_pipeline(
     settings: Settings | None = None,
     parser_backend: ParserBackend = "auto",
     strategy: ChunkingStrategy = "hierarchical",
     force_reparse: bool = False,
+    workers: int = 1,
 ) -> tuple[list[ParentChunk], list[ChildChunk]]:
     """Parse all PDFs listed in manifest.jsonl and produce parent/child chunk artifacts."""
     settings = settings or get_settings()
@@ -80,25 +98,62 @@ def run_ingestion_pipeline(
             f"No documents found in {settings.manifest_path}. Run download_corpus first."
         )
 
-    all_parents: list[ParentChunk] = []
-    all_children: list[ChildChunk] = []
-
+    md_suffix = "_plain.md" if parser_backend == "plain" else ".md"
+    to_parse: list[tuple[str, str, Path, Path]] = []
     for doc in docs:
         pdf_path = Path(doc.pdf_path) if doc.pdf_path else settings.raw_pdf_dir / f"{doc.doc_id}.pdf"
         if not pdf_path.exists():
             logger.warning("PDF missing for doc_id=%s at %s", doc.doc_id, pdf_path)
             continue
-
-        md_suffix = "_plain.md" if parser_backend == "plain" else ".md"
         md_path = settings.processed_md_dir / f"{doc.doc_id}{md_suffix}"
-
         if force_reparse or not md_path.exists():
-            logger.info("Parsing %s (%s) with backend=%s", doc.doc_id, doc.title[:50], parser_backend)
-            markdown_text = parse_pdf_to_markdown(pdf_path, backend=parser_backend)
-            md_path.write_text(markdown_text, encoding="utf-8")
-        else:
-            markdown_text = md_path.read_text(encoding="utf-8")
+            to_parse.append((doc.doc_id, doc.title, pdf_path, md_path))
 
+    if to_parse:
+        if workers > 1:
+            logger.info(
+                "Parsing %d PDFs with %d worker processes (backend=%s)",
+                len(to_parse),
+                workers,
+                parser_backend,
+            )
+            done = 0
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(
+                        _parse_single_pdf_worker,
+                        doc_id,
+                        title,
+                        str(pdf_path),
+                        str(md_path),
+                        parser_backend,
+                    )
+                    for doc_id, title, pdf_path, md_path in to_parse
+                ]
+                for fut in as_completed(futures):
+                    doc_id, ok, err = fut.result()
+                    done += 1
+                    if not ok:
+                        logger.warning("Failed to parse doc_id=%s (%s)", doc_id, err)
+                    if done % 25 == 0 or done == len(to_parse):
+                        logger.info("Parsed %d / %d PDFs", done, len(to_parse))
+        else:
+            for doc_id, title, pdf_path, md_path in to_parse:
+                logger.info("Parsing %s (%s) with backend=%s", doc_id, title[:50], parser_backend)
+                try:
+                    markdown_text = parse_pdf_to_markdown(pdf_path, backend=parser_backend)
+                    md_path.write_text(markdown_text, encoding="utf-8")
+                except Exception as exc:
+                    logger.warning("Failed to parse doc_id=%s: %s", doc_id, exc)
+
+    all_parents: list[ParentChunk] = []
+    all_children: list[ChildChunk] = []
+
+    for doc in docs:
+        md_path = settings.processed_md_dir / f"{doc.doc_id}{md_suffix}"
+        if not md_path.exists():
+            continue
+        markdown_text = md_path.read_text(encoding="utf-8")
         if not markdown_text.strip():
             logger.warning("Empty text extracted for doc_id=%s", doc.doc_id)
             continue
