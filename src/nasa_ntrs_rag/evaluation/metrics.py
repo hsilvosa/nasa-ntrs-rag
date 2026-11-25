@@ -74,9 +74,23 @@ def build_starter_eval_from_manifest(
 ) -> list[EvalSample]:
     """Generate a deterministic starter eval set from NTRS abstracts + out-of-domain controls."""
     docs = load_manifest(manifest_path)
+    # Stratify deterministically across topics when corpus exceeds max_factual
+    if len(docs) > max_factual:
+        by_topic: dict[str, list[Any]] = {}
+        for doc in docs:
+            by_topic.setdefault(doc.topic_query or "general", []).append(doc)
+        selected: list[Any] = []
+        topic_queues = [list(v) for v in by_topic.values()]
+        while len(selected) < max_factual and any(topic_queues):
+            for q in topic_queues:
+                if q and len(selected) < max_factual:
+                    selected.append(q.pop(0))
+    else:
+        selected = docs[:max_factual]
+
     samples: list[EvalSample] = []
 
-    for idx, doc in enumerate(docs[:max_factual], start=1):
+    for idx, doc in enumerate(selected, start=1):
         snippet = doc.abstract.split(".")[0].strip() if doc.abstract else doc.title
         question = (
             f"What technical findings or safety issues are analyzed in the NASA report "

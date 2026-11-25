@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import pickle
 import re
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -144,14 +147,50 @@ class HybridRetriever:
             )
         return self._reranker
 
+    def _bm25_cache_path(self) -> tuple[Path, tuple[int, int] | None]:
+        c_path = self.settings.processed_chunks_dir / (
+            f"{self.chunks_prefix}children.jsonl" if self.chunks_prefix else "children.jsonl"
+        )
+        cache_path = self.settings.processed_chunks_dir / (
+            f"{self.chunks_prefix}bm25.pkl" if self.chunks_prefix else "bm25.pkl"
+        )
+        sig = (c_path.stat().st_size, c_path.stat().st_mtime_ns) if c_path.exists() else None
+        return cache_path, sig
+
+    def _ensure_bm25(self) -> BM25Okapi | None:
+        if self._bm25 is not None or not self.children:
+            return self._bm25
+        cache_path, sig = self._bm25_cache_path()
+        if sig is not None and cache_path.exists():
+            try:
+                with cache_path.open("rb") as fh:
+                    cached = pickle.load(fh)
+                if (
+                    isinstance(cached, dict)
+                    and cached.get("sig") == sig
+                    and cached.get("count") == len(self.children)
+                ):
+                    self._bm25 = cached["bm25"]
+                    return self._bm25
+            except Exception:
+                pass
+        logger.info("Building BM25 index over %d child chunks...", len(self.children))
+        corpus_tokens = [tokenize_technical_text(c.contextual_text) for c in self.children]
+        self._bm25 = BM25Okapi(corpus_tokens)
+        if sig is not None:
+            try:
+                with cache_path.open("wb") as fh:
+                    pickle.dump({"sig": sig, "count": len(self.children), "bm25": self._bm25}, fh)
+            except Exception as exc:
+                logger.warning("Could not persist BM25 cache: %s", exc)
+        return self._bm25
+
     def _load_local_chunks(self) -> None:
         self.parents, self.children = load_chunks(
             self.settings.processed_chunks_dir, prefix=self.chunks_prefix
         )
         self.children_by_id = {c.chunk_id: c for c in self.children}
-        if self.children:
-            corpus_tokens = [tokenize_technical_text(c.contextual_text) for c in self.children]
-            self._bm25 = BM25Okapi(corpus_tokens)
+        self._bm25 = None
 
     def index_chunks(
         self,
@@ -159,22 +198,19 @@ class HybridRetriever:
         children: list[ChildChunk] | None = None,
         recreate: bool = True,
     ) -> int:
-        """Embed child chunks and upsert them into Qdrant alongside BM25 refresh."""
+        """Embed child chunks in streaming blocks and upsert into Qdrant alongside BM25 cache."""
         if parents is not None and children is not None:
             self.parents = {p.parent_id: p for p in parents}
             self.children = list(children)
             self.children_by_id = {c.chunk_id: c for c in self.children}
-            corpus_tokens = [tokenize_technical_text(c.contextual_text) for c in self.children]
-            self._bm25 = BM25Okapi(corpus_tokens) if corpus_tokens else None
+            self._bm25 = None
         else:
             self._load_local_chunks()
 
         if not self.children:
             raise ValueError("No child chunks available to index.")
 
-        vectors = self.embedder.encode([c.contextual_text for c in self.children], is_query=False)
-        dim = vectors.shape[1]
-
+        dim = self.embedder.dimension
         exists = self.client.collection_exists(self.collection_name)
         if exists and recreate:
             self.client.delete_collection(self.collection_name)
@@ -185,30 +221,52 @@ class HybridRetriever:
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
 
-        points: list[PointStruct] = []
-        for chunk, vec in zip(self.children, vectors, strict=True):
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))
-            payload = {
-                "chunk_id": chunk.chunk_id,
-                "parent_id": chunk.parent_id,
-                "doc_id": chunk.doc_id,
-                "title": chunk.title,
-                "section_title": chunk.section_title,
-                "text": chunk.text,
-                "page_start": chunk.page_start,
-                "page_end": chunk.page_end,
-                **chunk.metadata,
-            }
-            points.append(PointStruct(id=point_id, vector=vec.tolist(), payload=payload))
+        total = len(self.children)
+        # Larger blocks avoid repeated O(N^2) matrix reallocations in local embedded Qdrant
+        block_size = 2048 if self.settings.qdrant_url else 8192
+        upsert_batch = 256 if self.settings.qdrant_url else block_size
+        indexed = 0
 
-        batch_size = 128
-        for start in range(0, len(points), batch_size):
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=points[start : start + batch_size],
+        for block_start in range(0, total, block_size):
+            block_chunks = self.children[block_start : block_start + block_size]
+            vectors = self.embedder.encode(
+                [c.contextual_text for c in block_chunks], is_query=False
             )
-        logger.info("Indexed %d child chunks into Qdrant collection '%s'", len(points), self.collection_name)
-        return len(points)
+            points: list[PointStruct] = []
+            for chunk, vec in zip(block_chunks, vectors, strict=True):
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id))
+                payload = {
+                    "chunk_id": chunk.chunk_id,
+                    "parent_id": chunk.parent_id,
+                    "doc_id": chunk.doc_id,
+                    "title": chunk.title,
+                    "section_title": chunk.section_title,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "publication_year": chunk.metadata.get("publication_year"),
+                    "center": chunk.metadata.get("center"),
+                    "sti_type": chunk.metadata.get("sti_type"),
+                }
+                points.append(PointStruct(id=point_id, vector=vec.tolist(), payload=payload))
+
+            for start in range(0, len(points), upsert_batch):
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=points[start : start + upsert_batch],
+                )
+            indexed += len(points)
+            logger.info(
+                "Indexed %d / %d child chunks (%.1f%%) into '%s'",
+                indexed,
+                total,
+                100.0 * indexed / total,
+                self.collection_name,
+            )
+
+        # Warm and persist BM25 cache right after Qdrant indexing
+        self._ensure_bm25()
+        logger.info("Indexed %d child chunks into Qdrant collection '%s'", indexed, self.collection_name)
+        return indexed
 
     def _search_dense(
         self, query: str, top_k: int, filters: QueryFilters
@@ -231,19 +289,43 @@ class HybridRetriever:
     def _search_sparse(
         self, query: str, top_k: int, filters: QueryFilters
     ) -> list[tuple[str, float]]:
-        if self._bm25 is None or not self.children:
+        bm25 = self._ensure_bm25()
+        if bm25 is None or not self.children:
             return []
         tokens = tokenize_technical_text(query)
         if not tokens:
             return []
-        raw_scores = self._bm25.get_scores(tokens)
+        raw_scores = np.asarray(bm25.get_scores(tokens), dtype=np.float64)
+        has_filters = any(
+            (
+                filters.year_min is not None,
+                filters.year_max is not None,
+                bool(filters.center),
+                bool(filters.doc_ids),
+            )
+        )
+        if not has_filters:
+            n = len(raw_scores)
+            k = min(top_k, n)
+            if k <= 0:
+                return []
+            if n > k:
+                top_idx = np.argpartition(raw_scores, -k)[-k:]
+                top_idx = top_idx[np.argsort(raw_scores[top_idx])[::-1]]
+            else:
+                top_idx = np.argsort(raw_scores)[::-1]
+            return [
+                (self.children[int(i)].chunk_id, float(raw_scores[int(i)]))
+                for i in top_idx
+                if raw_scores[int(i)] > 0.0
+            ]
+
+        positive_idx = np.flatnonzero(raw_scores > 0.0)
         scored: list[tuple[str, float]] = []
-        for chunk, score in zip(self.children, raw_scores, strict=True):
-            if score <= 0:
-                continue
-            if not _chunk_matches_filters(chunk, filters):
-                continue
-            scored.append((chunk.chunk_id, float(score)))
+        for idx in positive_idx:
+            chunk = self.children[int(idx)]
+            if _chunk_matches_filters(chunk, filters):
+                scored.append((chunk.chunk_id, float(raw_scores[int(idx)])))
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:top_k]
 

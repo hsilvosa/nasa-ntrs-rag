@@ -80,13 +80,15 @@ ntrs-rag serve --port 8001
 
 ## Retrieval Ablation Results
 
-Measured on **31 NASA NTRS aerospace safety reports** (345.8 MB PDFs → 4,894 parent chunks, 14,940 child chunks) across **36 evaluation queries** (31 factual + 5 out-of-domain unanswerable controls) on an NVIDIA RTX 3060 12 GB (`BAAI/bge-base-en-v1.5` + `BAAI/bge-reranker-v2-m3`, CUDA `fp16`, `ABSTENTION_SCORE_THRESHOLD=0.15`):
+Measured on **2,426 NASA NTRS aerospace safety & engineering reports** (10.01 GB PDFs across 20 NASA domains → **77,379 parent chunks**, **241,641 child chunks**) across **105 stratified evaluation queries** (100 factual + 5 out-of-domain unanswerable controls) on an NVIDIA RTX 3060 12 GB (`BAAI/bge-base-en-v1.5` + `BAAI/bge-reranker-v2-m3`, CUDA `fp16`, embedded Qdrant + BM25, `ABSTENTION_SCORE_THRESHOLD=0.15`):
 
 | Mode | Recall@5 | MRR@10 | nDCG@10 | Unanswerable Abstention | Latency p50 (ms) | Latency p95 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `dense` (Baseline) | 0.968 | 0.919 | 0.932 | 0.0% | 59.7 | 66.9 |
-| `hybrid` (Dense + BM25 RRF) | 0.968 | 0.887 | 0.907 | 0.0% | 154.9 | 198.5 |
-| `hybrid_rerank` (+ bge-reranker-v2-m3) | **0.968** | **0.919** | **0.932** | **100.0%** | 561.7 | 694.1 |
+| `dense` (Baseline) | 0.920 | 0.849 | 0.870 | 0.0% | 829.8 | 1007.9 |
+| `hybrid` (Dense + BM25 RRF) | **0.950** | **0.907** | **0.918** | 0.0% | 3130.6 | 4301.7 |
+| `hybrid_rerank` (+ bge-reranker-v2-m3) | 0.930 | 0.749 | 0.800 | **100.0%** | 3609.2 | 4351.5 |
+
+> **Scale takeaways:** Moving from 31 reports (14.9k chunks) to 2,426 reports (241.6k chunks) makes the value of hybrid lexical+dense fusion clear (`+3.0` pts Recall@5, `+5.8` pts MRR@10, `+4.8` pts nDCG@10 over dense-only), while the cross-encoder gate achieves **100% abstention** on out-of-domain queries. For sub-50 ms dense search at >20k chunks, run Qdrant via `docker compose up -d` and set `QDRANT_URL=http://localhost:6333`.
 
 ## Testing & Linting
 

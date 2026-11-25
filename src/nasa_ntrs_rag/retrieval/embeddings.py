@@ -56,10 +56,18 @@ class DenseEmbedder:
         prepared = [
             f"{_BGE_QUERY_PREFIX}{t}" if (is_query and self._is_bge_en) else t for t in texts
         ]
-        all_vecs: list[np.ndarray] = []
+        n = len(prepared)
+        # Sort by character length for large batches to minimize transformer padding waste
+        if n > self.batch_size:
+            order = sorted(range(n), key=lambda idx: len(prepared[idx]))
+            ordered_texts = [prepared[i] for i in order]
+        else:
+            order = None
+            ordered_texts = prepared
 
-        for start in range(0, len(prepared), self.batch_size):
-            batch = prepared[start : start + self.batch_size]
+        all_vecs: list[np.ndarray] = []
+        for start in range(0, n, self.batch_size):
+            batch = ordered_texts[start : start + self.batch_size]
             encoded = self.tokenizer(
                 batch,
                 padding=True,
@@ -72,7 +80,12 @@ class DenseEmbedder:
             normalized = F.normalize(pooled.float(), p=2, dim=1)
             all_vecs.append(normalized.cpu().numpy().astype(np.float32))
 
-        return np.vstack(all_vecs)
+        stacked = np.vstack(all_vecs)
+        if order is not None:
+            restored = np.empty_like(stacked)
+            restored[order] = stacked
+            return restored
+        return stacked
 
 
 class CrossEncoderReranker:

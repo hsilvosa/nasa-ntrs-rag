@@ -101,6 +101,9 @@ def _promote_headings(text: str) -> str:
     return "\n".join(out)
 
 
+_TABLE_HINT_RE = re.compile(r"\btable\s+[0-9IVX]+", re.IGNORECASE)
+
+
 def _parse_with_pymupdf(pdf_path: Path, detect_tables: bool = True) -> str:
     """Parse PDF with PyMuPDF, optionally extracting tables to Markdown."""
     import pymupdf
@@ -110,20 +113,24 @@ def _parse_with_pymupdf(pdf_path: Path, detect_tables: bool = True) -> str:
         for page_idx, page in enumerate(doc, start=1):
             raw_text = page.get_text("text") or ""
             cleaned = re.sub(r"\n{3,}", "\n\n", raw_text).strip()
-            if detect_tables:
+            if detect_tables and cleaned:
                 cleaned = _promote_headings(cleaned)
-                try:
-                    tabs = page.find_tables()
-                    md_tables: list[str] = []
-                    for tab in tabs.tables:
-                        md_tbl = _format_table_as_markdown(tab.extract())
-                        if md_tbl:
-                            md_tables.append(md_tbl)
-                    if md_tables:
-                        cleaned = cleaned + "\n\n" + "\n\n".join(md_tables)
-                except Exception:
-                    # Table detection is best-effort on older/scanned PDFs
-                    pass
+                if _TABLE_HINT_RE.search(raw_text):
+                    try:
+                        # Run table extraction selectively on pages referencing a table without CAD plots
+                        drawings_count = len(page.get_drawings())
+                        if 4 <= drawings_count <= 400:
+                            tabs = page.find_tables()
+                            md_tables: list[str] = []
+                            for tab in tabs.tables:
+                                md_tbl = _format_table_as_markdown(tab.extract())
+                                if md_tbl:
+                                    md_tables.append(md_tbl)
+                            if md_tables:
+                                cleaned = cleaned + "\n\n" + "\n\n".join(md_tables)
+                    except Exception:
+                        # Table detection is best-effort on older/scanned PDFs
+                        pass
             if cleaned:
                 parts.append(f"<!-- page: {page_idx} -->\n{cleaned}")
     return "\n\n".join(parts)
