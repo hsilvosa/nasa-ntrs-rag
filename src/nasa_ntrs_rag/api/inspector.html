@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>NASA NTRS RAG Inspector</title>
+<style>
+  :root {
+    --bg: #0b1020; --panel: #131b31; --border: #253252;
+    --text: #e6edf7; --muted: #93a4c3; --accent: #4ea1ff;
+    --ok: #2ecc71; --warn: #f39c12;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
+  .controls { padding: 16px 24px; display: flex; gap: 10px; flex-wrap: wrap; border-bottom: 1px solid var(--border); background: #0f1629; }
+  input[type=text] { flex: 1; min-width: 280px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 14px; }
+  select, button { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #071122; font-weight: 600; border: none; }
+  main { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; padding: 20px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card h2 { margin: 0 0 12px 0; font-size: 15px; color: var(--accent); }
+  .answer { white-space: pre-wrap; line-height: 1.6; font-size: 14px; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 12px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .chunk { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #0e1528; }
+  .chunk-head { font-size: 12px; color: var(--accent); font-weight: 600; margin-bottom: 6px; }
+  .scores { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-family: monospace; }
+  .chunk-body { font-size: 12.5px; color: #d2dcf0; white-space: pre-wrap; max-height: 180px; overflow: auto; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; background: #1c2947; color: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>NASA NTRS Aerospace Safety RAG &mdash; Live Inspector</h1>
+  <span class="badge" id="statusBadge">Loading status...</span>
+</header>
+<div class="controls">
+  <input id="q" type="text" placeholder="Ask about aircraft icing, flight control failures, stall recovery, human factors..." />
+  <select id="mode">
+    <option value="hybrid_rerank">Hybrid (BM25 + Dense RRF) + Reranker</option>
+    <option value="hybrid">Hybrid (BM25 + Dense RRF)</option>
+    <option value="dense">Dense Only (Baseline)</option>
+  </select>
+  <button class="primary" onclick="runQuery()">Ask</button>
+</div>
+<main>
+  <section class="card">
+    <h2>Grounded Answer</h2>
+    <div id="answer" class="answer">Submit a query to inspect grounded citations, latency telemetry, and retrieved NASA NTRS passages.</div>
+    <div id="timings" class="meta"></div>
+    <div id="citations" class="meta"></div>
+  </section>
+  <section class="card">
+    <h2>Retrieved Evidence &amp; Per-Stage Scores</h2>
+    <div id="chunks"></div>
+  </section>
+</main>
+<script>
+async function loadHealth() {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    document.getElementById('statusBadge').textContent = `${d.device.toUpperCase()} | ${d.llm_provider}:${d.llm_model}`;
+  } catch (e) {
+    document.getElementById('statusBadge').textContent = 'API offline';
+  }
+}
+async function runQuery() {
+  const q = document.getElementById('q').value.trim();
+  if (!q) return;
+  const mode = document.getElementById('mode').value;
+  document.getElementById('answer').textContent = 'Retrieving and generating...';
+  document.getElementById('chunks').innerHTML = '';
+  const r = await fetch('/query', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({query: q, mode, top_k: 5})
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    document.getElementById('answer').textContent = 'Error: ' + (data.detail || r.statusText);
+    return;
+  }
+  document.getElementById('answer').textContent = data.answer;
+  const t = data.timings_ms || {};
+  document.getElementById('timings').innerHTML =
+    `<span>Mode: <b>${data.mode}</b></span>` +
+    `<span>Abstained: <b>${data.abstained}</b></span>` +
+    `<span>Retrieval: <b>${t.retrieval_ms ?? 0} ms</b></span>` +
+    `<span>Generation: <b>${t.generation_ms ?? 0} ms</b></span>` +
+    `<span>Total: <b>${t.total_ms ?? 0} ms</b></span>`;
+  document.getElementById('citations').innerHTML = (data.citations || []).map(c =>
+    `<a style="color:#4ea1ff" target="_blank" href="${c.ntrs_url}">[${c.citation_index}] NTRS ${c.doc_id} (p.${c.page_start ?? '?'})</a>`
+  ).join(' ');
+  document.getElementById('chunks').innerHTML = (data.retrieved_chunks || []).map((c, i) => `
+    <div class="chunk">
+      <div class="chunk-head">[${i+1}] ${c.title} (NTRS ${c.doc_id}) &mdash; ${c.section_title}</div>
+      <div class="scores">dense=${c.dense_score?.toFixed(3) ?? '-'} | bm25=${c.sparse_score?.toFixed(2) ?? '-'} | rrf=${c.rrf_score?.toFixed(4) ?? '-'} | rerank=${c.rerank_score?.toFixed(4) ?? '-'}</div>
+      <div class="chunk-body">${c.text.replace(/</g, '&lt;')}</div>
+    </div>
+  `).join('');
+}
+loadHealth();
+</script>
+</body>
+</html>

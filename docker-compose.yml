@@ -1,0 +1,10 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: nasa-ntrs-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - D:/datasets/nasa-ntrs/qdrant_docker:/qdrant/storage
+    restart: unless-stopped

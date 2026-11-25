@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nasa-ntrs-rag"
+version = "0.1.0"
+description = "Production-grade Hybrid & Hierarchical RAG over NASA NTRS Aerospace Safety Reports with reproducible IR ablation benchmarks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.27.0",
+    "openai>=1.55.0",
+    "qdrant-client>=1.12.0",
+    "rank-bm25>=0.2.2",
+    "pymupdf>=1.24.0",
+    "numpy>=1.26.0",
+    "tqdm>=4.66.0",
+    "typer>=0.12.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.5.0",
+    "transformers>=4.46.0",
+    "sentence-transformers>=3.3.0",
+]
+docling = [
+    "docling>=2.10.0",
+]
+gemini = [
+    "google-genai>=1.0.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+]
+
+[project.scripts]
+ntrs-rag = "nasa_ntrs_rag.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nasa_ntrs_rag"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "function"
