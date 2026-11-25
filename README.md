@@ -30,6 +30,8 @@ Qdrant (Dense BGE Embeddings + Metadata Filters)  +  BM25 Technical Tokenizer
 
 ## Key Engineering Highlights
 
+*(For a full component-by-component breakdown, development timeline, and Architectural Decision Records with measured evidence, see [docs/ARCHITECTURE_AND_DECISIONS.md](docs/ARCHITECTURE_AND_DECISIONS.md).)*
+
 - **Zero Black-Box Abstractions:** Clean PyTorch + Hugging Face Transformers bi-encoder (`DenseEmbedder`) and cross-encoder (`CrossEncoderReranker`) with CUDA `fp16` acceleration (tuned for RTX 3060 12 GB).
 - **Layout-Aware Parsing & Parent-Child Hierarchy:** Preserves section boundaries, exact page numbers, and Markdown tables intact; retrieves fine-grained child chunks and expands to parent sections for causal context.
 - **Hybrid Search + Deterministic Query Routing:** Combines Qdrant cosine search with BM25 lexical matching (preserving aerospace codes like `NASA-TM-20210012345` or `B737-MAX`) via Reciprocal Rank Fusion (RRF) and automatic temporal/center/doc-ID filter extraction.
