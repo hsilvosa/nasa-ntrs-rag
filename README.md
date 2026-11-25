@@ -30,7 +30,7 @@ Qdrant (Dense BGE Embeddings + Metadata Filters)  +  BM25 Technical Tokenizer
 
 ## Key Engineering Highlights
 
-*(For a full component-by-component breakdown, development timeline, and Architectural Decision Records with measured evidence, see [docs/ARCHITECTURE_AND_DECISIONS.md](docs/ARCHITECTURE_AND_DECISIONS.md).)*
+*(For a full component-by-component breakdown, development timeline, and Architectural Decision Records with measured evidence, see [docs/ARCHITECTURE_AND_DECISIONS.md](docs/ARCHITECTURE_AND_DECISIONS.md). A license-filtered Parquet release of the parsed Markdown, parent/child chunks, and evaluation set — 2,317 verified public-use reports, 308,624 rows, 226.5 MB — is published at [huggingface.co/datasets/hsilvosa/nasa-ntrs-aerospace](https://huggingface.co/datasets/hsilvosa/nasa-ntrs-aerospace).)*
 
 - **Zero Black-Box Abstractions:** Clean PyTorch + Hugging Face Transformers bi-encoder (`DenseEmbedder`) and cross-encoder (`CrossEncoderReranker`) with CUDA `fp16` acceleration (tuned for RTX 3060 12 GB).
 - **Layout-Aware Parsing & Parent-Child Hierarchy:** Preserves section boundaries, exact page numbers, and Markdown tables intact; retrieves fine-grained child chunks and expands to parent sections for causal context.
